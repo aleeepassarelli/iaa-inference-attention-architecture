@@ -109,4 +109,30 @@ CLI completo ✓
 
 Testes automatizados ✓
 
-Pronto para uso em produção e pesquisa!
+Instruções de Instalação
+Instalação Básica
+bash
+# Clone o repositório
+git clone https://github.com/eat-lab/framework.git
+cd framework
+
+# Instalar dependências
+pip install -r requirements.txt
+
+# Instalar pacote
+pip install -e .
+Instalação Mínima (Colab)
+bash
+!pip install -q -r requirements-minimal.txt
+Instalação para Desenvolvimento
+bash
+pip install -r requirements-dev.txt
+pip install -e .
+pre-commit install
+Usando Docker
+bash
+docker build -t eat-lab:latest .
+docker run -p 8888:8888 -v $(pwd):/app eat-lab:latest
+Verificação
+bash
+python -c "from eat_lab import EATScoreCalculator; print('✓ EAT-Lab instalado!')"
