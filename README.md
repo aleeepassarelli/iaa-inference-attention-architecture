@@ -1,4 +1,4 @@
-# 🧠 EIA Framework v1.0  
+# 🧠 EIA Estrutura de Atenção para Inferência 
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
