@@ -1,168 +1,149 @@
-# writing head_attribution.py script to /data/head_attribution.py
-script = r'''#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 head_attribution.py
+====================
 
-Compute attention-head attribution scores for a target token (or token index)
-using gradient × activation style attribution.
+Compute attention-head attribution scores for a target token using
+gradient × activation style attribution.
 
-Outputs a JSON with per-layer, per-head attribution scores and a CSV summary.
+This script estimates which attention heads most influence the model’s
+prediction for a given token in context. It can use either:
 
-Usage:
+1. **TransformerLens** (preferred, if installed)
+2. **Hugging Face Transformers** fallback (GPT-2 family or compatible models)
+
+Output:
+--------
+A JSON file with normalized per-head attribution scores.
+
+Example:
+---------
     python head_attribution.py \
         --model gpt2 \
         --text "The capital of France is Paris." \
         --target_token "Paris" \
-        --output /mnt/data/head_attribution_results.json
+        --output results/head_attribution.json
 
-Notes:
- - Tries to use transformer_lens.HookedTransformer if available (recommended).
- - Fallback to Hugging Face Transformers (GPT-2 family) with hooks.
- - This script is written to be readable and easily adapted into your pipelines.
- - It computes attribution roughly as: norm(grad * activation) aggregated over tokens.
+References:
+------------
+- Voita et al., “Analyzing Multi-Head Self-Attention: Specialized Heads Do the Heavy Lifting”, ACL 2019
+- Jain & Wallace, “Attention is not Explanation”, NAACL 2019
+- Vig, “A Multiscale Visualization of Attention in the Transformer Model”, 2019
 """
 
 import argparse
 import json
-import os
-from collections import defaultdict
-
 import torch
-import torch.nn.functional as F
+from collections import defaultdict
+from typing import Dict, Any
+
+# -------------------------
+# Utilities
+# -------------------------
+def save_json(path: str, data: Dict[str, Any]) -> None:
+    """Save a Python dictionary as UTF-8 JSON with indentation."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
 
 def try_import_transformer_lens():
+    """Try importing TransformerLens."""
     try:
-        import transformer_lens
         from transformer_lens import HookedTransformer
         return HookedTransformer
     except Exception:
         return None
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
+# -------------------------
+# TransformerLens pipeline
+# -------------------------
 def compute_with_transformer_lens(model_name, text, target_token_str, device):
     from transformer_lens import HookedTransformer
-    from transformer_lens.utils import gelu_approx
-    tokenizer = HookedTransformer.from_pretrained(model_name).tokenizer if False else None
-    # load model via HookedTransformer convenience loader
+
     model = HookedTransformer.from_pretrained(model_name, device=device)
     model.eval()
-    # tokenization via model.tokenizer
-    toks = model.to_tokens(text).to(device)
-    # run once to populate cache
-    out, cache = model.run_with_cache(toks)
-    # find target token index(es)
-    tokens_text = model.to_str_tokens(toks[0])
-    target_idxs = [i for i,tok in enumerate(tokens_text) if target_token_str in tok]
-    if not target_idxs:
-        # fallback: attempt tokenizing target token
-        target_toks = model.to_tokens(target_token_str)[0]
-        # find subsequence match
-        for i in range(len(toks[0]) - len(target_toks) + 1):
-            if torch.equal(toks[0,i:i+len(target_toks)], target_toks):
-                target_idxs = list(range(i, i+len(target_toks)))
-                break
-    if not target_idxs:
-        raise ValueError("Could not locate target token in tokenized input. Provide exact substring or token index.")
 
-    # We'll compute grad of sum logits for target token positions
-    logits = model.run_with_cache(toks)[0]
-    # pick final logits for all positions
-    # sum probabilities/logits of target token ids
-    # if tokenization resulted in multiple ids, we sum their logits at their positions
-    # For simplicity, sum logits at last position for the first target idx
+    toks = model.to_tokens(text).to(device)
+    tokens_text = model.to_str_tokens(toks[0])
+
+    # locate target token(s)
+    target_idxs = [i for i, tok in enumerate(tokens_text) if target_token_str in tok]
+    if not target_idxs:
+        raise ValueError(f"Target token '{target_token_str}' not found in input: {tokens_text}")
+
+    # forward pass with cache
+    logits, cache = model.run_with_cache(toks)
+
+    # pick target position (last occurrence)
     target_pos = target_idxs[-1]
-    # prepare gradient
+
+    # gradient of max logit at target position
     model.zero_grad()
-    logit = logits[0, target_pos, :].max()  # proxy: use max logit to backprop; alternatively pick specific token id
+    logit = logits[0, target_pos, :].max()
     logit.backward(retain_graph=True)
 
-    # For TransformerLens, cached activations are under cache, and gradients are stored in model parameters.
-    # We can access saved activations in cache keys like 'blocks.{layer}.attn.hook_v' etc.
-    # We'll gather common attention outputs if present.
+    # gather attention activations and grads
     attributions = defaultdict(list)
     for key, value in cache.items():
-        # look for attention head outputs keys that include 'attn' and 'hook_v' or 'hook_z' or 'hook_attn'
-        if ("attn" in key or "attn_out" in key or "head" in key) and isinstance(value, torch.Tensor):
-            # We attempt to get gradient for this activation (if registered)
-            grad = value.grad if value.requires_grad and value.grad is not None else None
-            # compute simple statistic: norm of activation * grad per head dimension if possible
-            # value shape often: (batch, seq, d_head * n_heads) or (batch, seq, n_heads, d_head)
+        if any(k in key for k in ["attn", "hook_z", "hook_v", "attn_out"]) and isinstance(value, torch.Tensor):
             v = value.detach()
+            grad = value.grad
             if grad is None:
-                # try to compute a Jacobian-like proxy via parameter gradients is harder here; fall back to activation norm
-                score = v.norm(dim=-1).mean().item()
+                score = v.norm().item()
             else:
-                score = (grad * v).norm(dim=-1).mean().item()
+                score = (grad * v).abs().mean().item()
             attributions[key].append(score)
-    # Reduce lists to mean
-    attributions_mean = {k: float(sum(v)/len(v)) if len(v)>0 else 0.0 for k,v in attributions.items()}
-    return attributions_mean
 
+    # average per key
+    return {k: float(sum(v) / len(v)) for k, v in attributions.items() if v}
+
+
+# -------------------------
+# Hugging Face fallback
+# -------------------------
 def compute_with_hf_gpt2(model_name, text, target_token_str, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained(model_name, output_attentions=True, output_hidden_states=True).to(device)
+
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    model = AutoModelForCausalLM.from_pretrained(model_name, output_attentions=True).to(device)
     model.eval()
 
     inputs = tokenizer(text, return_tensors="pt").to(device)
     input_ids = inputs["input_ids"]
-    attention_mask = inputs.get("attention_mask", None)
 
-    # forward pass to get logits and attentions
-    outputs = model(input_ids, attention_mask=attention_mask, output_attentions=True, output_hidden_states=True)
-    logits = outputs.logits  # [batch, seq, vocab]
-    # locate target token ids
-    target_tokens = tokenizer(target_token_str, add_special_tokens=False)["input_ids"]
-    # find last occurrence position of target token sequence if present
-    input_ids_list = input_ids[0].tolist()
+    # find target token id(s)
+    target_ids = tokenizer(target_token_str, add_special_tokens=False)["input_ids"]
+    seq = input_ids[0].tolist()
+
+    # find position
     target_pos = None
-    if len(target_tokens) == 1:
-        tok = target_tokens[0]
-        if tok in input_ids_list:
-            target_pos = len(input_ids_list) - 1 - input_ids_list[::-1].index(tok)
-    else:
-        # subsequence search
-        for i in range(len(input_ids_list) - len(target_tokens) + 1):
-            if input_ids_list[i:i+len(target_tokens)] == target_tokens:
-                target_pos = i + len(target_tokens) - 1
-                break
-
+    for i in range(len(seq) - len(target_ids) + 1):
+        if seq[i:i + len(target_ids)] == target_ids:
+            target_pos = i + len(target_ids) - 1
+            break
     if target_pos is None:
-        raise ValueError("Target token not found in tokenized input. Try a substring that matches tokenization.")
+        raise ValueError(f"Target token '{target_token_str}' not found in tokenized sequence.")
 
-    # compute gradient of logit of target position's max (proxy)
+    # forward + grad
     model.zero_grad()
-    # choose logit for the true token id at that position if provided, else max
-    target_id = input_ids[0, target_pos].item()
-    logit = logits[0, target_pos, target_id]
+    outputs = model(**inputs)
+    logits = outputs.logits
+    logit = logits[0, target_pos, seq[target_pos]]
     logit.backward(retain_graph=True)
 
-    # Now collect attention outputs and their gradients.
-    # For GPT2 in HF, attention outputs are in outputs.attentions: tuple of (batch, n_heads, seq, seq) attention weights
-    # But to attribute to heads we want the head outputs (after projection). Those are not directly returned.
-    # We'll attach forward hooks to the model's attention modules to capture 'v' or 'out' activations and their grads.
-    # However we only executed forward already; to get activations with hooks and gradients, we re-run forward with hooks.
-
-    head_acts = {}
-    head_grads = {}
-
+    # hook attention outputs
+    head_acts, head_grads = {}, {}
     hooks = []
 
     def make_hook(name):
         def hook(module, inp, out):
-            # out is tensor of shape [batch, seq, d_model] for the attention output
             head_acts[name] = out.detach().clone().requires_grad_(True)
-            # register hook for grad on this tensor
             def grad_fn(grad):
                 head_grads[name] = grad.detach().clone()
             head_acts[name].register_hook(grad_fn)
         return hook
 
-    # register hooks on modules that look like attention projections
-    # common path for GPT2: model.transformer.h.{i}.attn
     for name, module in model.named_modules():
         if name.endswith("attn") or ("attn" in name and "mlp" not in name):
             try:
@@ -170,68 +151,73 @@ def compute_with_hf_gpt2(model_name, text, target_token_str, device):
             except Exception:
                 pass
 
-    # rerun forward to populate hooks and grads
     model.zero_grad()
-    outputs2 = model(input_ids, attention_mask=attention_mask, output_attentions=True, output_hidden_states=True)
-    logits2 = outputs2.logits
-    logit2 = logits2[0, target_pos, input_ids[0, target_pos].item()]
+    out2 = model(**inputs)
+    logits2 = out2.logits
+    logit2 = logits2[0, target_pos, seq[target_pos]]
     logit2.backward()
 
-    # remove hooks
     for h in hooks:
         h.remove()
 
-    # compute attribution per named head module by combining head_acts and head_grads norms
     attributions = {}
     for name, act in head_acts.items():
-        grad = head_grads.get(name, None)
-        if grad is None:
-            score = act.norm().item()
-        else:
-            # proxy attribution: mean over seq and feature dims of |act * grad|
-            score = (act * grad).abs().mean().item()
+        grad = head_grads.get(name)
+        score = (act.abs().mean().item() if grad is None else (act * grad).abs().mean().item())
         attributions[name] = score
 
     return attributions
 
+
+# -------------------------
+# Main CLI
+# -------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Head attribution via gradient×activation (approx).")
-    parser.add_argument("--model", type=str, default="gpt2", help="model id (transformers) or HookedTransformer name")
-    parser.add_argument("--text", type=str, required=True, help="input text (contains target token)")
-    parser.add_argument("--target_token", type=str, required=True, help="substring of the token to attribute (e.g., 'Paris')")
-    parser.add_argument("--device", type=str, default="cpu", help="device: cpu or cuda")
-    parser.add_argument("--output", type=str, default="/mnt/data/head_attribution_results.json", help="output JSON path")
+    parser = argparse.ArgumentParser(description="Compute attention head attribution via grad×activation.")
+    parser.add_argument("--model", type=str, default="gpt2", help="Model name (transformers or TransformerLens ID)")
+    parser.add_argument("--text", type=str, required=True, help="Input text containing the target token")
+    parser.add_argument("--target_token", type=str, required=True, help="Substring or token to attribute (e.g., 'Paris')")
+    parser.add_argument("--device", type=str, default="cpu", help="Device: 'cpu' or 'cuda'")
+    parser.add_argument("--output", type=str, default="head_attribution_results.json", help="Output JSON path")
     args = parser.parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() and "cuda" in args.device else "cpu")
-    HT = try_import_transformer_lens()
-    print(f"Using device: {device}. transformer_lens available: {HT is not None}")
+    device = torch.device("cuda" if torch.cuda.is_available() and "cuda" in args.device else "cpu")
+    print(f"[INFO] Using device: {device}")
 
+    HT = try_import_transformer_lens()
     if HT is not None:
+        print("[INFO] TransformerLens detected. Using HookedTransformer pipeline.")
         try:
             attributions = compute_with_transformer_lens(args.model, args.text, args.target_token, device)
         except Exception as e:
-            print("TransformerLens path failed:", e)
-            print("Falling back to Hugging Face GPT2 path.")
+            print(f"[WARN] TransformerLens path failed: {e}")
+            print("[INFO] Falling back to HuggingFace pipeline.")
             attributions = compute_with_hf_gpt2(args.model, args.text, args.target_token, device)
     else:
+        print("[INFO] TransformerLens not available. Using HuggingFace pipeline.")
         attributions = compute_with_hf_gpt2(args.model, args.text, args.target_token, device)
 
-    # Normalize and structure results
-    # simple normalization to [0,1]
+    # Normalize to [0,1]
     vals = list(attributions.values())
-    minv, maxv = min(vals) if vals else 0.0, max(vals) if vals else 1.0
-    normalized = {}
-    for k,v in attributions.items():
-        norm = (v - minv) / (maxv - minv + 1e-12)
-        normalized[k] = {"raw": v, "norm": norm}
+    if vals:
+        minv, maxv = min(vals), max(vals)
+    else:
+        minv, maxv = 0.0, 1.0
+    normalized = {
+        k: {"raw": v, "norm": (v - minv) / (maxv - minv + 1e-12)} for k, v in attributions.items()
+    }
 
-    save_json(args.output, {"model": args.model, "text": args.text, "target_token": args.target_token, "device": str(device), "attributions": normalized})
-    print("Saved results to", args.output)
+    result = {
+        "model": args.model,
+        "text": args.text,
+        "target_token": args.target_token,
+        "device": str(device),
+        "attributions": normalized,
+    }
+
+    save_json(args.output, result)
+    print(f"[OK] Saved attribution results to {args.output}")
+
 
 if __name__ == "__main__":
     main()
-'''
-open('/mnt/data/head_attribution.py','w', encoding='utf-8').write(script)
-"/mnt/data/head_attribution.py"
-
