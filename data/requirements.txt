@@ -1,0 +1,68 @@
+# ============================================================
+# EAT-Lab Framework - Requirements
+# ============================================================
+# Framework completo para análise semântica e causal de LLMs
+# Versão: 3.0 (2025-11-09)
+# Python: 3.8+
+# ============================================================
+
+# Core Deep Learning
+torch>=2.0.0,<2.3.0
+transformers>=4.35.0,<5.0.0
+accelerate>=0.24.0
+safetensors>=0.4.0
+
+# Sentence Embeddings
+sentence-transformers>=2.2.2,<3.0.0
+
+# Scientific Computing
+numpy>=1.24.0,<2.0.0
+scipy>=1.10.0,<2.0.0
+scikit-learn>=1.3.0,<2.0.0
+
+# Data Manipulation
+pandas>=2.0.0,<3.0.0
+
+# Visualization
+matplotlib>=3.7.0,<4.0.0
+seaborn>=0.12.0,<1.0.0
+plotly>=5.17.0,<6.0.0
+
+# Network Analysis
+networkx>=3.1,<4.0.0
+
+# Progress Bars
+tqdm>=4.66.0,<5.0.0
+
+# Notebook Support
+ipywidgets>=8.1.0,<9.0.0
+ipython>=8.12.0,<9.0.0
+jupyter>=1.0.0
+
+# Optional: Model Optimization
+bitsandbytes>=0.41.0  # Quantization
+einops>=0.7.0  # Tensor operations
+
+# Optional: Advanced Analysis
+umap-learn>=0.5.4  # Dimensionality reduction
+hdbscan>=0.8.33  # Clustering
+
+# Optional: Experiment Tracking
+wandb>=0.15.0  # Weights & Biases
+tensorboard>=2.14.0
+
+# Testing & Quality
+pytest>=7.4.0,<8.0.0
+pytest-cov>=4.1.0,<5.0.0
+black>=23.9.0,<24.0.0
+flake8>=6.1.0,<7.0.0
+mypy>=1.5.0,<2.0.0
+
+# Documentation
+sphinx>=7.2.0,<8.0.0
+sphinx-rtd-theme>=1.3.0,<2.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+requests>=2.31.0
