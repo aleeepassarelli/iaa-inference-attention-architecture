@@ -13,8 +13,6 @@
 
 > **Tagline:** *EIA — Estrutura de Atenção para Inferência: controle físico da curvatura semântica.*
 
-Minimalismo cirúrgico para engenharia de prompts: cada palavra com propósito, cada métrica com evidência.
-
 **Resumo:**
 
 O **EIA Framework (Estrutura de Atenção para Inferência)** é um modelo de arquitetura linguística que formaliza como a atenção de LLMs se organiza em níveis de estrutura e inferência.  
